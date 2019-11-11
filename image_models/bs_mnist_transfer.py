@@ -5,29 +5,34 @@ Created on Fri Aug 16 21:35:27 2019
 @author: barre
 """
 import os
-# os.chdir('DATA_PATH')
+# os.chdir('DATA PATH')
 import torch
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 import matplotlib.pyplot as plt
 
 # Random Seeds
 torch.manual_seed(42)
 
 # Setup transforms
-transform = transforms.Compose([transforms.ToTensor(),
-                                transforms.Normalize((0.5,), (0.5,))])
+transform = transforms.Compose([transforms.Grayscale(3),
+                                transforms.Resize(256),
+                                transforms.CenterCrop(224),
+                                transforms.ToTensor(),
+                                transforms.Normalize(
+                                    mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])])
 
 # Downlaod data
-trainset = datasets.MNIST('./data/', download=True,
+trainset = datasets.MNIST('./data4/', download=True,
                           train=True, transform=transform)
 
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=64,
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=32,
                                           shuffle=True)
 
-testset = datasets.MNIST('./data/', download=True,
+testset = datasets.MNIST('./data4/', download=True,
                          train=False, transform=transform)
 
-testloader = torch.utils.data.DataLoader(testset, batch_size=64,
+testloader = torch.utils.data.DataLoader(testset, batch_size=32,
                                          shuffle=True)
 
 # Shapes
@@ -41,59 +46,60 @@ print(test_image.shape)
 print(test_label.shape)
 
 # Display first image
-plt.imshow(images[0].numpy().squeeze(), cmap='gray_r')
+plt.imshow(images[0][0, :, :].numpy(), cmap='gray_r')
 
 
-class Net(torch.nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        
-        # Build conv layers
-        self.conv1 = torch.nn.Conv2d(in_channels=1, out_channels=8,
-                                     kernel_size=5)
-        self.conv2 = torch.nn.Conv2d(in_channels=8, out_channels=32,
-                                     kernel_size=5)
-        
-        # Dense layers
-        self.dense1 = torch.nn.Linear(in_features=512, out_features=64)
-        self.dense2 = torch.nn.Linear(in_features=64, out_features=10)
-        
-    def forward(self, x):
-        # Push x throuh conv layer 1, relu, max pool
-        x = torch.nn.functional.relu(input=self.conv1(x))
-        x = torch.nn.functional.max_pool2d(input=x, kernel_size=(2, 2))
-        
-        # Push x through conv layer 2, relu, max pool
-        x = torch.nn.functional.relu(input=self.conv2(x))
-        x = torch.nn.functional.max_pool2d(input=x, kernel_size=(2, 2))
-        
-        # Flatten
-        x = x.view(-1, self.__num_flat_features(x))
-        
-        # Push through fully connected 1, relu
-        x = torch.nn.functional.relu(input=self.dense1(x))
-        
-        # Push through final connected layer
-        x = self.dense2(x)
-        
-        return x
+def get_pretrained_vgg_net(num_classes):
+    # Load pretrained model
+    pretrained_model = models.vgg11_bn(pretrained=True)
     
-    def __num_flat_features(self, x):
-        """Helper method to get shape of individual comeponents of tensor"""
-        # The shape without num samples
-        size = x.size()[1:]
-        # print(size)
-        # Shapes multiplied to give the number of features
-        num_features = 1
-        for s in size:
-            num_features *= s
-        return num_features
+    # Freeze training for all layers
+    for param in pretrained_model.features.parameters():
+        param.require_grad = False
+    
+    # Get number of input features in last classifier layer
+    num_last_layer_input_features = pretrained_model.classifier[-1].in_features
+    
+    # Grab model up to last layer
+    features = list(pretrained_model.classifier.children())[:-1]
+    new_last_layer = torch.nn.Linear(num_last_layer_input_features,
+                                     num_classes)
+    features.extend([new_last_layer])
+    
+    # Overwrite classifier with new structure
+    pretrained_model.classifier = torch.nn.Sequential(*features)
+    
+    return pretrained_model
+
+
+def get_pretrained_squeeze_net(num_classes):
+    # Load pretrained model
+    pretrained_model = models.squeezenet1_1(pretrained=True)
+    
+    # Freeze training for all layers
+    for param in pretrained_model.features.parameters():
+        param.require_grad = False
+    
+    # Get number of input features in last classifier layer
+    cov_last_input = pretrained_model.classifier[1].in_channels
+    cov_last_output = pretrained_model.classifier[1].out_channels
+    
+    # Grab model layer to update
+    features = list(pretrained_model.classifier.children())
+    features[1] = torch.nn.Conv2d(cov_last_input, num_classes,
+                                  kernel_size=(1, 1), stride=(1, 1))
+    
+    # Overwrite classifier with new structure
+    pretrained_model.classifier = torch.nn.Sequential(*features)
+    pretrained_model.num_classes = num_classes
+    
+    return pretrained_model
 
 
 class NetTrainer:
     def __init__(self):
         # Initialze Net
-        self.net = Net()
+        self.net = get_pretrained_squeeze_net(num_classes=10)
         print('Model Structure:\n')
         print(self.net)
         
@@ -157,6 +163,9 @@ class NetTrainer:
                     print('Loss: ' + str(normalized_loss))
                     self.__running_loss = 0
                     
+                # Clean up cuda cache
+                torch.cuda.empty_cache()
+                    
     def score(self, validation_or_test_loader):
         # Init accuracy metrics
         validation_or_test_loss = 0
@@ -193,7 +202,7 @@ class NetTrainer:
     def predict(self, image_data):
         # Show image
         print('Image to be predicted:\n')
-        plt.imshow(image_data.numpy().squeeze(), cmap='gray_r')
+        plt.imshow(image_data[0, :, :].numpy().squeeze(), cmap='gray_r')
         
         # Eval Model
         self.net.eval()
